@@ -2737,6 +2737,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "tool": tool_name,
                     "duration": round(kwargs.get("duration", 0), 3),
                     "error": kwargs.get("is_error", False),
+                    "output": preview,  # 工具执行结果在 preview 字段中
                 })
             elif event_type == "reasoning.available":
                 _push({

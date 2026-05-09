@@ -10262,7 +10262,7 @@ class AIAgent:
                 if not blocked and self.tool_progress_callback:
                     try:
                         self.tool_progress_callback(
-                            "tool.completed", function_name, None, None,
+                            "tool.completed", function_name, function_result, None,
                             duration=tool_duration, is_error=is_error,
                         )
                     except Exception as cb_err:
@@ -10687,7 +10687,7 @@ class AIAgent:
             if not _execution_blocked and self.tool_progress_callback:
                 try:
                     self.tool_progress_callback(
-                        "tool.completed", function_name, None, None,
+                        "tool.completed", function_name, function_result, None,
                         duration=tool_duration, is_error=_is_error_result,
                     )
                 except Exception as cb_err:
