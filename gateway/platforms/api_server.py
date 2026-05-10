@@ -3272,6 +3272,183 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._run_statuses.pop(run_id, None)
 
     # ------------------------------------------------------------------
+    # MCP Server Management API
+    # ------------------------------------------------------------------
+
+    async def _handle_list_mcp_servers(self, request: "web.Request") -> "web.Response":
+        """List all configured MCP servers with their connection status."""
+        try:
+            from tools.mcp_tool import _servers, _lock
+            servers = {}
+            with _lock:
+                config = self._get_mcp_config() or {}
+                mcp_servers = config.get("mcp_servers", {})
+                for name, cfg in mcp_servers.items():
+                    connected = name in _servers and _servers[name].session is not None
+                    tool_count = 0
+                    if connected:
+                        try:
+                            tool_count = len(_servers[name]._registered_tools)
+                        except (AttributeError, TypeError):
+                            pass
+                    servers[name] = {
+                        "name": name,
+                        "transport": cfg.get("transport") or ("http" if cfg.get("url") else "stdio"),
+                        "connected": connected,
+                        "tool_count": tool_count,
+                        "enabled": True,
+                    }
+            return web.json_response({"servers": list(servers.values())})
+        except Exception as e:
+            logger.error("[%s] Error listing MCP servers: %s", self.name, e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_get_mcp_server(self, request: "web.Request") -> "web.Response":
+        """Get details for a specific MCP server."""
+        name = request.match_info.get("name")
+        try:
+            from tools.mcp_tool import _servers, _lock
+            config = self._get_mcp_config() or {}
+            mcp_servers = config.get("mcp_servers", {})
+            if name not in mcp_servers:
+                return web.json_response({"detail": f"MCP server '{name}' not found"}, status=404)
+            with _lock:
+                connected = name in _servers and _servers[name].session is not None
+                tool_count = 0
+                if connected:
+                    try:
+                        tool_count = len(_servers[name]._registered_tools)
+                    except (AttributeError, TypeError):
+                        pass
+            return web.json_response({
+                "name": name,
+                "transport": mcp_servers[name].get("transport") or ("http" if mcp_servers[name].get("url") else "stdio"),
+                "connected": connected,
+                "tool_count": tool_count,
+                "enabled": True,
+            })
+        except Exception as e:
+            logger.error("[%s] Error getting MCP server %s: %s", self.name, name, e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_mcp_server_connect(self, request: "web.Request") -> "web.Response":
+        """Connect to an MCP server."""
+        name = request.match_info.get("name")
+        try:
+            from tools.mcp_tool import _servers, _lock, _connect_server, _discover_and_register_server, _ensure_mcp_loop, _run_on_mcp_loop
+            config = self._get_mcp_config() or {}
+            mcp_servers = config.get("mcp_servers", {})
+            if name not in mcp_servers:
+                return web.json_response({"error": f"MCP server '{name}' not found"}, status=404)
+            server_config = mcp_servers[name].copy()
+            # Remove internal fields
+            server_config.pop("transport", None)
+            # Ensure MCP loop is running first
+            _ensure_mcp_loop()
+            # Run connection on the MCP event loop in executor to avoid blocking
+            def _sync_connect():
+                try:
+                    return _run_on_mcp_loop(_discover_and_register_server(name, server_config), timeout=60)
+                except Exception as e:
+                    logger.error("[%s] _sync_connect failed: %s", self.name, e)
+                    return []
+            loop = asyncio.get_event_loop()
+            tools_registered = await loop.run_in_executor(None, _sync_connect)
+            tool_count = len(tools_registered) if tools_registered else 0
+            return web.json_response({
+                "name": name,
+                "success": True,
+                "connected": True,
+                "tool_count": tool_count,
+                "tools": tools_registered or [],
+            })
+        except Exception as e:
+            logger.error("[%s] Error connecting MCP server %s: %s", self.name, name, e)
+            return web.json_response({
+                "name": name,
+                "success": False,
+                "connected": False,
+                "tool_count": 0,
+                "error": str(e),
+            }, status=500)
+
+    async def _handle_mcp_server_disconnect(self, request: "web.Request") -> "web.Response":
+        """Disconnect from an MCP server."""
+        name = request.match_info.get("name")
+        try:
+            from tools.mcp_tool import _servers, _lock, _run_on_mcp_loop
+            with _lock:
+                if name not in _servers:
+                    return web.json_response({
+                        "name": name,
+                        "success": True,
+                        "connected": False,
+                        "message": f"MCP server '{name}' was not connected"
+                    })
+                server = _servers[name]
+                del _servers[name]
+            # Shutdown the server on the MCP event loop using executor
+            def _sync_shutdown():
+                try:
+                    _run_on_mcp_loop(server.shutdown(), timeout=10)
+                except Exception as e:
+                    logger.warning("[%s] Error shutting down MCP server %s: %s", self.name, name, e)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _sync_shutdown)
+            return web.json_response({
+                "name": name,
+                "success": True,
+                "connected": False,
+            })
+        except Exception as e:
+            logger.error("[%s] Error disconnecting MCP server %s: %s", self.name, name, e)
+            return web.json_response({
+                "name": name,
+                "success": False,
+                "connected": False,
+                "error": str(e),
+            }, status=500)
+
+    async def _handle_mcp_server_status(self, request: "web.Request") -> "web.Response":
+        """Get the connection status of an MCP server."""
+        name = request.match_info.get("name")
+        try:
+            from tools.mcp_tool import _servers, _lock
+            config = self._get_mcp_config() or {}
+            mcp_servers = config.get("mcp_servers", {})
+            if name not in mcp_servers:
+                return web.json_response({"detail": f"MCP server '{name}' not found"}, status=404)
+            with _lock:
+                connected = name in _servers and _servers[name].session is not None
+                tool_count = 0
+                if connected:
+                    try:
+                        tool_count = len(_servers[name]._registered_tools)
+                    except (AttributeError, TypeError):
+                        pass
+            transport = mcp_servers[name].get("transport") or ("http" if mcp_servers[name].get("url") else "stdio")
+            return web.json_response({
+                "name": name,
+                "connected": connected,
+                "tool_count": tool_count,
+                "transport": transport,
+                "enabled": True,
+            })
+        except Exception as e:
+            logger.error("[%s] Error getting MCP server status %s: %s", self.name, name, e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    def _get_mcp_config(self) -> Optional[Dict[str, Any]]:
+        """Load MCP server configuration from config file."""
+        try:
+            from hermes_cli.config import load_config
+            config = load_config()
+            return config
+        except Exception as e:
+            logger.error("[%s] Error loading MCP config: %s", self.name, e)
+            return None
+
+    # ------------------------------------------------------------------
     # BasePlatformAdapter interface
     # ------------------------------------------------------------------
 
@@ -3309,6 +3486,12 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
             self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
+            # MCP Server Management API
+            self._app.router.add_get("/api/mcp/servers", self._handle_list_mcp_servers)
+            self._app.router.add_get("/api/mcp/servers/{name}", self._handle_get_mcp_server)
+            self._app.router.add_post("/api/mcp/servers/{name}/connect", self._handle_mcp_server_connect)
+            self._app.router.add_post("/api/mcp/servers/{name}/disconnect", self._handle_mcp_server_disconnect)
+            self._app.router.add_get("/api/mcp/servers/{name}/status", self._handle_mcp_server_status)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:

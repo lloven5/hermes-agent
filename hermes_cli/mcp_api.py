@@ -377,6 +377,154 @@ async def test_mcp_server(name: str, timeout: float = 30.0):
         )
 
 
+@router.post("/servers/{name}/connect")
+async def connect_mcp_server(name: str, timeout: float = 30.0):
+    """Connect to an MCP server and register its tools.
+    
+    This is primarily useful for stdio servers which are not connected by default.
+    HTTP servers are typically connected automatically on startup.
+    """
+    config = load_config()
+    servers_config = _get_mcp_servers(config)
+    
+    if name not in servers_config:
+        raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
+    
+    try:
+        from tools.mcp_tool import _servers, _lock, register_mcp_servers, _ensure_mcp_loop
+        import asyncio
+        
+        with _lock:
+            if name in _servers:
+                server = _servers[name]
+                if server.session is not None:
+                    return MCPServerResponse(
+                        name=name,
+                        url=servers_config[name].get("url"),
+                        command=servers_config[name].get("command"),
+                        args=servers_config[name].get("args", []),
+                        env=servers_config[name].get("env"),
+                        headers=servers_config[name].get("headers"),
+                        transport=servers_config[name].get("transport", "stdio"),
+                        auth=servers_config[name].get("auth"),
+                        enabled=servers_config[name].get("enabled", True),
+                        tools=servers_config[name].get("tools"),
+                        timeout=servers_config[name].get("timeout", 30.0),
+                        connected=True,
+                        tool_count=len(getattr(server, "_registered_tool_names", [])),
+                    )
+        
+        # Start the MCP event loop
+        _ensure_mcp_loop()
+        
+        # Connect to the server
+        server_config = servers_config[name]
+        server_config["connect_timeout"] = timeout
+        
+        async def _connect():
+            from tools.mcp_tool import _discover_and_register_server
+            return await _discover_and_register_server(name, server_config)
+        
+        loop = asyncio.get_event_loop()
+        tool_names = loop.run_until_complete(_connect())
+        
+        # Return success response
+        return {
+            "name": name,
+            "success": True,
+            "connected": True,
+            "tool_count": len(tool_names),
+            "tools": tool_names,
+            "message": f"Successfully connected to '{name}' with {len(tool_names)} tools"
+        }
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"MCP module not available: {exc}")
+    except Exception as exc:
+        return {
+            "name": name,
+            "success": False,
+            "connected": False,
+            "tool_count": 0,
+            "error": str(exc),
+        }
+
+
+@router.post("/servers/{name}/disconnect")
+async def disconnect_mcp_server(name: str):
+    """Disconnect an MCP server and unregister its tools."""
+    config = load_config()
+    servers_config = _get_mcp_servers(config)
+    
+    if name not in servers_config:
+        raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
+    
+    try:
+        from tools.mcp_tool import _servers, _lock
+        import asyncio
+        
+        with _lock:
+            if name not in _servers:
+                return {
+                    "name": name,
+                    "success": True,
+                    "connected": False,
+                    "message": f"MCP server '{name}' was not connected"
+                }
+            
+            server = _servers[name]
+        
+        # Shutdown the server
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(server.shutdown())
+        
+        with _lock:
+            del _servers[name]
+        
+        return {
+            "name": name,
+            "success": True,
+            "connected": False,
+            "message": f"Successfully disconnected '{name}'"
+        }
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"MCP module not available: {exc}")
+    except Exception as exc:
+        return {
+            "name": name,
+            "success": False,
+            "connected": False,
+            "error": str(exc),
+        }
+
+
+@router.get("/servers/{name}/status")
+async def get_mcp_server_status(name: str):
+    """Get the connection status of an MCP server."""
+    config = load_config()
+    servers_config = _get_mcp_servers(config)
+    
+    if name not in servers_config:
+        raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
+    
+    server_config = servers_config[name]
+    connected_servers = _get_connected_servers()
+    
+    server = connected_servers.get(name)
+    is_connected = server is not None and getattr(server, 'session', None) is not None
+    
+    tool_count = 0
+    if is_connected:
+        tool_count = len(getattr(server, "_registered_tool_names", []))
+    
+    return {
+        "name": name,
+        "connected": is_connected,
+        "tool_count": tool_count,
+        "transport": server_config.get("transport", "http") if "url" in server_config else "stdio",
+        "enabled": server_config.get("enabled", True),
+    }
+
+
 @router.get("/servers/{name}/tools")
 async def get_mcp_tools(name: str):
     """Get the list of tools exposed by an MCP server."""
