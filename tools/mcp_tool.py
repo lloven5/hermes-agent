@@ -3217,6 +3217,191 @@ def get_mcp_status() -> List[dict]:
     return result
 
 
+# =============================================================================
+# MCP List / View tools (progressive disclosure, similar to skills_tool.py)
+# =============================================================================
+
+def mcp_list() -> str:
+    """
+    List all configured MCP servers with minimal metadata (progressive disclosure tier 1).
+
+    Returns server name, transport type, connection status, and tool count.
+    Use mcp_view(name) to see full tool schemas and details.
+
+    Returns:
+        JSON string with MCP server info: name, transport, connected, tool_count
+    """
+    try:
+        configured = _load_mcp_config()
+        if not configured:
+            return json.dumps({
+                "success": True,
+                "servers": [],
+                "message": "No MCP servers configured. Add them to ~/.hermes/config.yaml under mcp_servers.",
+            }, ensure_ascii=False)
+
+        with _lock:
+            active_servers = dict(_servers)
+
+        servers = []
+        for name, cfg in configured.items():
+            transport = cfg.get("transport", "http") if "url" in cfg else "stdio"
+            server = active_servers.get(name)
+            if server and server.session is not None:
+                tool_count = len(getattr(server, "_registered_tool_names", []) or getattr(server, "_tools", []))
+                servers.append({
+                    "name": name,
+                    "transport": transport,
+                    "connected": True,
+                    "tool_count": tool_count,
+                    "config": _redact_config(cfg),
+                })
+            else:
+                servers.append({
+                    "name": name,
+                    "transport": transport,
+                    "connected": False,
+                    "tool_count": 0,
+                    "config": _redact_config(cfg),
+                })
+
+        # Sort: connected first, then by name
+        servers.sort(key=lambda s: (not s["connected"], s["name"]))
+
+        return json.dumps({
+            "success": True,
+            "servers": servers,
+            "count": len(servers),
+            "connected_count": sum(1 for s in servers if s["connected"]),
+            "hint": "Use mcp_view(name) to see detailed tool schemas for a specific server",
+        }, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        logger.exception("mcp_list error: %s", e)
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+def mcp_view(server_name: str) -> str:
+    """
+    View detailed information about a specific MCP server (progressive disclosure tier 2-3).
+
+    Returns full tool schemas, resource schemas, prompt schemas, and server metadata.
+    Use mcp_list() first to see available server names.
+
+    Args:
+        server_name: Name of the MCP server (e.g., "filesystem", "github")
+
+    Returns:
+        JSON string with detailed server info and full tool schemas
+    """
+    try:
+        configured = _load_mcp_config()
+        if not configured:
+            return json.dumps({
+                "success": False,
+                "error": "No MCP servers configured. Add them to ~/.hermes/config.yaml under mcp_servers.",
+            }, ensure_ascii=False)
+
+        if server_name not in configured:
+            available = list(configured.keys())
+            return json.dumps({
+                "success": False,
+                "error": f"MCP server '{server_name}' not found.",
+                "available_servers": available,
+            }, ensure_ascii=False)
+
+        config = configured[server_name]
+
+        with _lock:
+            server = _servers.get(server_name)
+
+        if not server or server.session is None:
+            return json.dumps({
+                "success": False,
+                "server_name": server_name,
+                "connected": False,
+                "error": f"MCP server '{server_name}' is not connected. Check logs for connection errors.",
+                "config": _redact_config(config),
+            }, ensure_ascii=False)
+
+        # Collect tools
+        tools = []
+        for mcp_tool in getattr(server, "_tools", []):
+            schema = _convert_mcp_schema(server_name, mcp_tool)
+            tools.append({
+                "name": schema["name"],
+                "description": schema["description"],
+                "parameters": schema["parameters"],
+                "original_name": mcp_tool.name,
+            })
+
+        # Collect resources if available
+        resources = []
+        try:
+            resources_result = _run_on_mcp_loop(server.session.list_resources(), timeout=10)
+            if resources_result and hasattr(resources_result, "resources"):
+                for res in resources_result.resources:
+                    resources.append({
+                        "name": res.name if hasattr(res, "name") else str(res),
+                        "uri": res.uri if hasattr(res, "uri") else "",
+                        "description": res.description if hasattr(res, "description") else "",
+                        "mimeType": res.mimeType if hasattr(res, "mimeType") else "",
+                    })
+        except Exception as e:
+            logger.debug("Could not list resources for %s: %s", server_name, e)
+
+        # Collect prompts if available
+        prompts = []
+        try:
+            prompts_result = _run_on_mcp_loop(server.session.list_prompts(), timeout=10)
+            if prompts_result and hasattr(prompts_result, "prompts"):
+                for prompt in prompts_result.prompts:
+                    prompts.append({
+                        "name": prompt.name if hasattr(prompt, "name") else str(prompt),
+                        "description": prompt.description if hasattr(prompt, "description") else "",
+                    })
+        except Exception as e:
+            logger.debug("Could not list prompts for %s: %s", server_name, e)
+
+        transport = config.get("transport", "http") if "url" in config else "stdio"
+
+        return json.dumps({
+            "success": True,
+            "server_name": server_name,
+            "connected": True,
+            "transport": transport,
+            "config": _redact_config(config),
+            "tools": {
+                "count": len(tools),
+                "items": tools,
+            },
+            "resources": {
+                "count": len(resources),
+                "items": resources,
+            },
+            "prompts": {
+                "count": len(prompts),
+                "items": prompts,
+            },
+            "sampling": dict(server._sampling.metrics) if server._sampling else None,
+            "hint": "Use these tool names directly in your agent's tool_calls",
+        }, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        logger.exception("mcp_view error for %s: %s", server_name, e)
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _redact_config(config: dict) -> dict:
+    """Return config with sensitive values redacted for display."""
+    sensitive_keys = {"env", "headers", "auth", "token", "password", "secret", "key", "api_key"}
+    redacted = dict(config)
+    for key in list(redacted.keys()):
+        if any(s in key.lower() for s in sensitive_keys):
+            redacted[key] = "***REDACTED***"
+    return redacted
+
+
 def probe_mcp_server_tools() -> Dict[str, List[tuple]]:
     """Temporarily connect to configured MCP servers and list their tools.
 
@@ -3406,3 +3591,50 @@ def _stop_mcp_loop():
         # graceful shutdown are now orphaned — include active PIDs too
         # since the loop is gone and no session can still be in flight.
         _kill_orphaned_mcp_children(include_active=True)
+
+# =============================================================================
+# Tool registration 
+# =============================================================================
+
+from tools.registry import registry
+
+MCP_LIST_SCHEMA = {
+    "name": "mcp_list",
+    "description": "List all configured MCP servers with minimal metadata. Returns server name, transport type, connection status, and tool count. Use mcp_view(name) to see detailed tool schemas.",
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+MCP_VIEW_SCHEMA = {
+    "name": "mcp_view",
+    "description": "View detailed information about a specific MCP server including full tool schemas, resources, and prompts.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "server_name": {
+                "type": "string",
+                "description": "Name of the MCP server to view (e.g., 'filesystem', 'github')",
+            },
+        },
+        "required": ["server_name"],
+    },
+}
+
+registry.register(
+    name="mcp_list",
+    toolset="mcp",
+    schema=MCP_LIST_SCHEMA,
+    handler=lambda args, **kw: mcp_list(),
+    description="List MCP servers",
+)
+
+registry.register(
+    name="mcp_view",
+    toolset="mcp",
+    schema=MCP_VIEW_SCHEMA,
+    handler=lambda args, **kw: mcp_view(args.get("server_name", "")),
+    description="View MCP server details",
+)
