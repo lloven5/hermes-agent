@@ -2732,6 +2732,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "timestamp": ts,
                     "tool": tool_name,
                     "preview": preview,
+                    "input": args,  # Include arguments for frontend tool bubble display
                 })
             elif event_type == "tool.completed":
                 _push({
@@ -3512,6 +3513,67 @@ class APIServerAdapter(BasePlatformAdapter):
             logger.error("[%s] Error getting MCP server status %s: %s", self.name, name, e)
             return web.json_response({"error": str(e)}, status=500)
 
+    async def _auto_connect_mcp_servers(self) -> None:
+        """Auto-connect all enabled MCP servers on startup."""
+        try:
+            config = self._get_mcp_config()
+            if not config:
+                return
+            
+            mcp_servers = config.get("mcp_servers", {})
+            if not mcp_servers:
+                return
+            
+            enabled_servers = {
+                name: cfg for name, cfg in mcp_servers.items()
+                if cfg.get("enabled", True)
+            }
+            
+            if not enabled_servers:
+                return
+            
+            logger.info("[%s] Auto-connecting %d enabled MCP servers...", self.name, len(enabled_servers))
+            
+            # Import and use the MCP tools module
+            from tools.mcp_tool import (
+                _servers, _lock, _ensure_mcp_loop, _run_on_mcp_loop,
+                _discover_and_register_server
+            )
+            
+            # Ensure MCP event loop is running
+            _ensure_mcp_loop()
+            
+            # Connect each enabled server
+            for name, server_config in enabled_servers.items():
+                try:
+                    config_copy = server_config.copy()
+                    config_copy.pop("transport", None)
+                    config_copy.pop("enabled", None)
+                    
+                    def _sync_connect():
+                        try:
+                            return _run_on_mcp_loop(
+                                _discover_and_register_server(name, config_copy),
+                                timeout=60
+                            )
+                        except Exception as e:
+                            logger.warning("[%s] Auto-connect failed for MCP server '%s': %s", self.name, name, e)
+                            return []
+                    
+                    loop = asyncio.get_event_loop()
+                    tools = await loop.run_in_executor(None, _sync_connect)
+                    if tools:
+                        logger.info("[%s] Auto-connected MCP server '%s' with %d tools", self.name, name, len(tools))
+                    else:
+                        logger.warning("[%s] Auto-connect for MCP server '%s' returned no tools", self.name, name)
+                except Exception as e:
+                    logger.warning("[%s] Failed to auto-connect MCP server '%s': %s", self.name, name, e)
+            
+            logger.info("[%s] MCP auto-connect completed", self.name)
+            
+        except Exception as e:
+            logger.error("[%s] Error during MCP auto-connect: %s", self.name, e)
+
     def _get_mcp_config(self) -> Optional[Dict[str, Any]]:
         """Load MCP server configuration from config file."""
         try:
@@ -3617,6 +3679,9 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._runner.setup()
             self._site = web.TCPSite(self._runner, self._host, self._port)
             await self._site.start()
+
+            # Auto-connect enabled MCP servers on startup
+            await self._auto_connect_mcp_servers()
 
             self._mark_connected()
             if not self._api_key:
