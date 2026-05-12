@@ -1119,12 +1119,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 _started_tool_call_ids.add(tool_call_id)
                 from agent.display import build_tool_preview, get_tool_emoji
                 label = build_tool_preview(function_name, function_args) or function_name
+                # Include arguments/input for frontend tool bubble display
+                tool_args = function_args if isinstance(function_args, dict) else {}
                 _stream_q.put(("__tool_progress__", {
                     "tool": function_name,
                     "emoji": get_tool_emoji(function_name),
                     "label": label,
                     "toolCallId": tool_call_id,
                     "status": "running",
+                    "input": tool_args,
+                    "arguments": tool_args,
                 }))
 
             def _on_tool_complete(tool_call_id, function_name, function_args, function_result):

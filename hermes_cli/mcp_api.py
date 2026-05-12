@@ -421,12 +421,8 @@ async def connect_mcp_server(name: str, timeout: float = 30.0):
         server_config = servers_config[name]
         server_config["connect_timeout"] = timeout
         
-        async def _connect():
-            from tools.mcp_tool import _discover_and_register_server
-            return await _discover_and_register_server(name, server_config)
-        
-        loop = asyncio.get_event_loop()
-        tool_names = loop.run_until_complete(_connect())
+        from tools.mcp_tool import _discover_and_register_server
+        tool_names = await _discover_and_register_server(name, server_config)
         
         # Return success response
         return {
