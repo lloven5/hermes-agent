@@ -400,8 +400,19 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
     resolved_env = dict(env or {})
 
     if os.sep not in resolved_command:
-        path_arg = resolved_env["PATH"] if "PATH" in resolved_env else None
-        which_hit = shutil.which(resolved_command, path=path_arg)
+        path_arg = resolved_env.get("PATH")
+        # WSL environment fix: filter out Windows paths (/mnt/c/*, /mnt/d/*, etc.)
+        # to prevent shutil.which() from finding Windows executables instead of Linux ones.
+        # Also update resolved_env so the subprocess inherits the filtered PATH.
+        if path_arg:
+            path_parts = path_arg.split(os.pathsep)
+            windows_prefixes = ("/mnt/c", "/mnt/d", "/mnt/e", "/mnt/f")
+            filtered_parts = [p for p in path_parts if not p.startswith(windows_prefixes)]
+            filtered_path = os.pathsep.join(filtered_parts) if filtered_parts else None
+            resolved_env["PATH"] = filtered_path  # Update env for subprocess
+            which_hit = shutil.which(resolved_command, path=filtered_path) if filtered_path else None
+        else:
+            which_hit = None
         if which_hit:
             resolved_command = which_hit
         elif resolved_command in {"npx", "npm", "node"}:

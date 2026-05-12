@@ -3376,6 +3376,76 @@ class APIServerAdapter(BasePlatformAdapter):
                 "error": str(e),
             }, status=500)
 
+    async def _handle_mcp_server_test(self, request: "web.Request") -> "web.Response":
+        """Test connection to an MCP server and list its tools (temporary connection)."""
+        name = request.match_info.get("name")
+        try:
+            from hermes_cli.mcp_config import _probe_single_server
+            from tools.mcp_tool import _resolve_stdio_command, _build_safe_env
+            
+            # Debug: Check if the WSL PATH fix is loaded
+            config = self._get_mcp_config() or {}
+            mcp_servers = config.get("mcp_servers", {})
+            if name not in mcp_servers:
+                return web.json_response({"error": f"MCP server '{name}' not found"}, status=404)
+            server_config = mcp_servers[name].copy()
+            server_config.pop("transport", None)
+            
+            # Debug: Check npx resolution
+            safe_env = _build_safe_env(server_config.get("env"))
+            resolved_cmd, resolved_env = _resolve_stdio_command(server_config.get("command", "npx"), safe_env)
+            logger.info("[mcp_test] Server '%s' - resolved command: %s", name, resolved_cmd)
+            if "/mnt/c" in resolved_env.get("PATH", ""):
+                logger.warning("[mcp_test] Server '%s' - WSL PATH still contains Windows paths!", name)
+            
+            # Use probe_single_server which creates a temporary connection
+            tools = _probe_single_server(name, server_config, connect_timeout=30)
+            tool_infos = [{"name": t[0], "description": t[1]} for t in tools]
+            return web.json_response({
+                "name": name,
+                "success": True,
+                "connected": True,
+                "tool_count": len(tools),
+                "tools": tool_infos,
+            })
+        except Exception as e:
+            logger.error("[%s] Error testing MCP server %s: %s", self.name, name, e)
+            return web.json_response({
+                "name": name,
+                "success": False,
+                "connected": False,
+                "tool_count": 0,
+                "error": str(e),
+            }, status=500)
+
+    async def _handle_mcp_server_tools(self, request: "web.Request") -> "web.Response":
+        """Get tools from a connected MCP server."""
+        name = request.match_info.get("name")
+        try:
+            from tools.mcp_tool import _servers, _lock
+            with _lock:
+                if name not in _servers or _servers[name].session is None:
+                    return web.json_response({
+                        "error": f"MCP server '{name}' is not currently connected"
+                    }, status=503)
+                server = _servers[name]
+                tools = []
+                for t in getattr(server, "_tools", []):
+                    tools.append({
+                        "name": t.name,
+                        "description": getattr(t, "description", "") or "",
+                    })
+                return web.json_response({
+                    "name": name,
+                    "tools": tools,
+                    "total": len(tools),
+                })
+        except Exception as e:
+            logger.error("[%s] Error getting tools from MCP server %s: %s", self.name, name, e)
+            return web.json_response({
+                "error": str(e),
+            }, status=500)
+
     async def _handle_mcp_server_disconnect(self, request: "web.Request") -> "web.Response":
         """Disconnect from an MCP server."""
         name = request.match_info.get("name")
@@ -3496,6 +3566,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/mcp/servers/{name}/connect", self._handle_mcp_server_connect)
             self._app.router.add_post("/api/mcp/servers/{name}/disconnect", self._handle_mcp_server_disconnect)
             self._app.router.add_get("/api/mcp/servers/{name}/status", self._handle_mcp_server_status)
+            self._app.router.add_post("/api/mcp/servers/{name}/test", self._handle_mcp_server_test)
+            self._app.router.add_get("/api/mcp/servers/{name}/tools", self._handle_mcp_server_tools)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:
