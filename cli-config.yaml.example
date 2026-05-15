@@ -8,7 +8,7 @@
 model:
   # Default model to use (can be overridden with --model flag)
   # Both "default" and "model" work as the key name here.
-  default: "anthropic/claude-opus-4.6"
+  default: "qwen3.5"
   
   # Inference provider selection:
   #   "auto"         - Auto-detect from credentials (default)
@@ -20,7 +20,7 @@ model:
   #   "copilot"      - GitHub Copilot / GitHub Models (requires: GITHUB_TOKEN)
   #   "gemini"      - Use Google AI Studio direct (requires: GOOGLE_API_KEY or GEMINI_API_KEY)
   #   "zai"         - Use z.ai / ZhipuAI GLM models (requires: GLM_API_KEY)
-  #   "kimi-coding"  - Kimi / Moonshot AI (requires: KIMI_API_KEY)
+  #   "kimi-coding"  - Kimi / Mooonshot AI (requires: KIMI_API_KEY)
   #   "minimax"      - MiniMax global (requires: MINIMAX_API_KEY)
   #   "minimax-cn"   - MiniMax China (requires: MINIMAX_CN_API_KEY)
   #   "huggingface"  - Hugging Face Inference (requires: HF_TOKEN)
@@ -39,11 +39,11 @@ model:
   #   It works with both no-auth and auth-enabled server modes.
   #
   # Can also be overridden with --provider flag or HERMES_INFERENCE_PROVIDER env var.
-  provider: "auto"
+  provider: "custom"
   
   # API configuration (falls back to OPENROUTER_API_KEY env var)
   # api_key: "your-key-here"  # Uncomment to set here instead of .env
-  base_url: "https://openrouter.ai/api/v1"
+  base_url: "https://uni-api.cstcloud.cn/v1"
 
   # ── Token limits — two settings, easy to confuse ──────────────────────────
   #
@@ -658,6 +658,15 @@ platform_toolsets:
 #     reply_to_mode: "first"  # off | first | all
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
+
+# =============================================================================
+# API Server Settings (for external API clients like AnythingLLM, NextChat, etc.)
+# =============================================================================
+api_server:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8642
+  key: ""  # Optional: set an API key for authentication
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Available toolsets (use these names in platform_toolsets or the toolsets list)

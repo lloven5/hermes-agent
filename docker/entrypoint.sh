@@ -5,6 +5,9 @@ set -e
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
 
+# Default: Enable dashboard by default in Docker
+HERMES_DASHBOARD="${HERMES_DASHBOARD:-1}"
+
 # --- Privilege dropping via gosu ---
 # When started as root (the default for Docker, or fakeroot in rootless Podman),
 # optionally remap the hermes user/group to match host-side ownership, fix volume
@@ -101,8 +104,10 @@ if [ -d "$INSTALL_DIR/skills" ]; then
 fi
 
 # Optionally start `hermes dashboard` as a side-process.
+# Default: HERMES_DASHBOARD=1 (enabled by default for Docker deployments).
 #
 # Toggled by HERMES_DASHBOARD=1 (also accepts "true"/"yes", case-insensitive).
+# Set HERMES_DASHBOARD=0 to disable.
 # Host/port/TUI can be overridden via:
 #   HERMES_DASHBOARD_HOST  (default 0.0.0.0 — exposed outside the container)
 #   HERMES_DASHBOARD_PORT  (default 9119, matches `hermes dashboard` default)

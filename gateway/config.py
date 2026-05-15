@@ -1366,27 +1366,44 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             thread_id=os.getenv("SMS_HOME_CHANNEL_THREAD_ID") or None,
         )
 
-    # API Server
-    api_server_enabled = os.getenv("API_SERVER_ENABLED", "").lower() in ("true", "1", "yes")
-    api_server_key = os.getenv("API_SERVER_KEY", "")
-    api_server_cors_origins = os.getenv("API_SERVER_CORS_ORIGINS", "")
-    api_server_port = os.getenv("API_SERVER_PORT")
-    api_server_host = os.getenv("API_SERVER_HOST")
-    if api_server_enabled or api_server_key:
+    # API Server - read from config.yaml (top-level api_server key)
+    api_server_config = data.get("api_server", {})
+    api_server_enabled_from_config = api_server_config.get("enabled", False)
+    api_server_enabled_from_env = os.getenv("API_SERVER_ENABLED", "").lower() in ("true", "1", "yes")
+    
+    if api_server_enabled_from_config or api_server_enabled_from_env:
         if Platform.API_SERVER not in config.platforms:
             config.platforms[Platform.API_SERVER] = PlatformConfig()
         config.platforms[Platform.API_SERVER].enabled = True
+        
+        # Read settings from config file first, then allow env vars to override
+        if api_server_config.get("host"):
+            config.platforms[Platform.API_SERVER].extra["host"] = api_server_config["host"]
+        if api_server_config.get("port"):
+            config.platforms[Platform.API_SERVER].extra["port"] = int(api_server_config["port"])
+        if api_server_config.get("key"):
+            config.platforms[Platform.API_SERVER].extra["key"] = api_server_config["key"]
+        if api_server_config.get("cors_origins"):
+            config.platforms[Platform.API_SERVER].extra["cors_origins"] = api_server_config["cors_origins"]
+        if api_server_config.get("model_name"):
+            config.platforms[Platform.API_SERVER].extra["model_name"] = api_server_config["model_name"]
+        
+        # Environment variables override config file
+        api_server_key = os.getenv("API_SERVER_KEY", "")
         if api_server_key:
             config.platforms[Platform.API_SERVER].extra["key"] = api_server_key
+        api_server_cors_origins = os.getenv("API_SERVER_CORS_ORIGINS", "")
         if api_server_cors_origins:
             origins = [origin.strip() for origin in api_server_cors_origins.split(",") if origin.strip()]
             if origins:
                 config.platforms[Platform.API_SERVER].extra["cors_origins"] = origins
+        api_server_port = os.getenv("API_SERVER_PORT")
         if api_server_port:
             try:
                 config.platforms[Platform.API_SERVER].extra["port"] = int(api_server_port)
             except ValueError:
                 pass
+        api_server_host = os.getenv("API_SERVER_HOST")
         if api_server_host:
             config.platforms[Platform.API_SERVER].extra["host"] = api_server_host
         api_server_model_name = os.getenv("API_SERVER_MODEL_NAME", "")

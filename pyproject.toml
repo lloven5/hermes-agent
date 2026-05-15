@@ -141,6 +141,7 @@ all = [
   "hermes-agent[daytona]",
   "hermes-agent[vercel]",
   "hermes-agent[messaging]",
+  "aiohttp>=3.13.0,<4",
   # matrix: python-olm (required by matrix-nio[e2e]) is upstream-broken on
   # modern macOS (archived libolm, C++ errors with Clang 21+).  On Linux the
   # [matrix] extra's own marker pulls in the [e2e] variant automatically.
