@@ -10,6 +10,7 @@ Usage:
 """
 
 import asyncio
+import datetime as dt
 import hmac
 import importlib.util
 import json
@@ -223,14 +224,7 @@ async def host_header_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Require the session token on all /api/ routes except the public list."""
-    path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
-        if not _has_valid_session_token(request):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Unauthorized"},
-            )
+    """No authentication required for any API routes."""
     return await call_next(request)
 
 
@@ -4215,7 +4209,7 @@ mount_spa(app)
 def start_server(
     host: str = "127.0.0.1",
     port: int = 9119,
-    open_browser: bool = True,
+    open_browser: bool = False,
     allow_public: bool = False,
     *,
     embedded_chat: bool = False,

@@ -393,6 +393,90 @@ class ResponseStore:
         return row[0] if row else 0
 
 
+class ReportStore:
+    """
+    SQLite-backed store for session reports.
+
+    Stores generated reports with session association, timestamps, and content.
+    """
+
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            try:
+                from hermes_cli.config import get_hermes_home
+                db_path = str(get_hermes_home() / "report_store.db")
+            except Exception:
+                db_path = ":memory:"
+        try:
+            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        except Exception:
+            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS reports (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                session_title TEXT,
+                content TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )"""
+        )
+        self._conn.commit()
+
+    def put(self, report_id: str, session_id: str, session_title: str, content: str) -> None:
+        """Store a report."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO reports (id, session_id, session_title, content, created_at) VALUES (?, ?, ?, ?, ?)",
+            (report_id, session_id, session_title, content, time.time()),
+        )
+        self._conn.commit()
+
+    def get(self, report_id: str) -> Optional[Dict[str, Any]]:
+        """Get a report by ID."""
+        row = self._conn.execute(
+            "SELECT id, session_id, session_title, content, created_at FROM reports WHERE id = ?", (report_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "session_id": row[1],
+            "session_title": row[2],
+            "content": row[3],
+            "created_at": row[4],
+        }
+
+    def list(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """List all reports, newest first."""
+        rows = self._conn.execute(
+            "SELECT id, session_id, session_title, content, created_at FROM reports ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "session_id": row[1],
+                "session_title": row[2],
+                "content": row[3],
+                "created_at": row[4],
+            }
+            for row in rows
+        ]
+
+    def delete(self, report_id: str) -> bool:
+        """Delete a report by ID. Returns True if found and deleted."""
+        cursor = self._conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def close(self) -> None:
+        """Close the database connection."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # CORS middleware
 # ---------------------------------------------------------------------------
@@ -611,6 +695,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._report_store = ReportStore()  # Store for session reports
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -3277,6 +3362,152 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._run_statuses.pop(run_id, None)
 
     # ------------------------------------------------------------------
+    # Reports API
+    # ------------------------------------------------------------------
+
+    async def _handle_generate_report(self, request: "web.Request") -> "web.Response":
+        """POST /api/hermes/reports/generate — Generate a summary report from conversation messages using LLM."""
+        try:
+            body = await request.json()
+            session_id = body.get("session_id", "")
+            session_title = body.get("session_title", "Untitled Session")
+            messages = body.get("messages", [])
+
+            if not messages:
+                return web.json_response({"error": "No messages provided"}, status=400)
+
+            # Build prompt for report generation
+            conversation_text = self._build_conversation_text(messages)
+            report_prompt = f"""基于以下对话内容生成一份详细的会话总结报告：
+
+{conversation_text}
+
+请生成一份专业的markdown格式报告，包含以下部分：
+1. 会话概述（时间、参与内容等）
+2. 主要讨论主题
+3. 完成的工作和决策
+4. 关键问题和解决方案
+5. 下一步建议
+
+请直接返回markdown格式的报告内容。
+"""
+
+            # Call LLM to generate report
+            report_content = await self._call_llm_for_report(report_prompt)
+
+            # Store the report
+            report_id = f"report_{int(time.time() * 1000)}"
+            self._report_store.put(report_id, session_id, session_title, report_content)
+
+            return web.json_response({
+                "report": {
+                    "id": report_id,
+                    "session_id": session_id,
+                    "session_title": session_title,
+                    "content": report_content,
+                    "created_at": time.time(),
+                }
+            })
+        except Exception as e:
+            logger.error("[%s] Error generating report: %s", self.name, str(e))
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _call_llm_for_report(self, prompt: str) -> str:
+        """Call LLM to generate report content using the main model configuration."""
+        try:
+            # Import the necessary modules for LLM call
+            from agent.auxiliary_client import resolve_provider_client, extract_content_or_reasoning
+            from hermes_cli.config import load_config
+
+            # Load config to get current model settings
+            config = load_config()
+            model_section = config.get("model", {})
+            main_model = model_section.get("default", "deepseek-v3:671b")
+            main_provider = model_section.get("provider", "custom")
+
+            # Find custom provider config for API key and base_url
+            custom_providers = config.get("custom_providers", []) or []
+            provider_config = None
+            for cp in custom_providers:
+                cp_name = f"custom:{cp.get('name', '').lower().replace(' ', '-')}"
+                if cp_name == main_provider:
+                    provider_config = cp
+                    break
+
+            main_api_key = provider_config.get("api_key", "") if provider_config else ""
+            main_base_url = provider_config.get("base_url", "") if provider_config else ""
+
+            # Create client with main model config
+            client, resolved_model = resolve_provider_client(
+                provider=main_provider,
+                model=main_model,
+                explicit_api_key=main_api_key,
+                explicit_base_url=main_base_url,
+            )
+
+            # Call LLM synchronously
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model=resolved_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=8192,
+                )
+            )
+
+            report_content = extract_content_or_reasoning(response) or str(response)
+            return report_content
+        except Exception as e:
+            logger.error("[%s] LLM call failed for report: %s", self.name, str(e))
+            return f"报告生成失败: {str(e)}"
+
+    @staticmethod
+    def _build_conversation_text(messages: List[Dict[str, Any]]) -> str:
+        """Build conversational text from message format."""
+        parts = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if content:
+                parts.append(f"【{role.upper()}】\n{content}")
+        return "\n\n".join(parts)
+
+    async def _handle_list_reports(self, request: "web.Request") -> "web.Response":
+        """GET /api/hermes/reports — List all reports."""
+        try:
+            limit = int(request.query.get("limit", 100))
+            reports = self._report_store.list(limit=limit)
+            return web.json_response({"reports": reports})
+        except Exception as e:
+            logger.error("[%s] Error listing reports: %s", self.name, str(e))
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_get_report(self, request: "web.Request") -> "web.Response":
+        """GET /api/hermes/reports/{report_id} — Get a specific report."""
+        try:
+            report_id = request.match_info["report_id"]
+            report = self._report_store.get(report_id)
+            if report is None:
+                return web.json_response({"error": "Report not found"}, status=404)
+            return web.json_response({"report": report})
+        except Exception as e:
+            logger.error("[%s] Error getting report: %s", self.name, str(e))
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_delete_report(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/hermes/reports/{report_id} — Delete a specific report."""
+        try:
+            report_id = request.match_info["report_id"]
+            deleted = self._report_store.delete(report_id)
+            if not deleted:
+                return web.json_response({"error": "Report not found"}, status=404)
+            return web.json_response({"id": report_id, "deleted": True})
+        except Exception as e:
+            logger.error("[%s] Error deleting report: %s", self.name, str(e))
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------
     # MCP Server Management API
     # ------------------------------------------------------------------
 
@@ -3630,6 +3861,11 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/api/mcp/servers/{name}/status", self._handle_mcp_server_status)
             self._app.router.add_post("/api/mcp/servers/{name}/test", self._handle_mcp_server_test)
             self._app.router.add_get("/api/mcp/servers/{name}/tools", self._handle_mcp_server_tools)
+            # Reports API (path matches proxy translation: /api/hermes/* -> /api/*)
+            self._app.router.add_post("/api/reports/generate", self._handle_generate_report)
+            self._app.router.add_get("/api/reports", self._handle_list_reports)
+            self._app.router.add_get("/api/reports/{report_id}", self._handle_get_report)
+            self._app.router.add_delete("/api/reports/{report_id}", self._handle_delete_report)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:
