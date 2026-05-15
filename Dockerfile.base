@@ -1,15 +1,15 @@
-# Combined Dockerfile for hermes-agent
-# This file combines Dockerfile.base and Dockerfile.app into a single build stage.
+# Local dependency + runtime base. Tag after build, then use Dockerfile.app
+# for source-only rebuilds:
+#   docker build -f Dockerfile.base -t hermes-agent-base:latest .
 #
-# Build command:
-#   docker build -t hermes-agent:latest .
+# Rebuild when package-lock.json, pyproject.toml, uv.lock, apt needs, or the
+# copied manifest paths change — not on every application commit.
+# Includes: OS/apt, Node/Playwright/npm installs, uv sync (no project),
+# permissions, and container ENTRYPOINT/VOLUME/HERMES_* env.
 #
-# Note: The two-stage builder from Dockerfile.base is preserved to allow
-# layer caching for dependency changes separately from source code changes.
-# The final stage produces the runtime image.
 FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
 FROM tianon/gosu:1.19-trixie@sha256:3b176695959c71e123eb390d427efc665eeb561b1540e82679c15e992006b8b9 AS gosu_source
-FROM debian:13.4 AS base
+FROM debian:13.4
 
 # Disable Python stdout buffering to ensure logs are printed immediately
 ENV PYTHONUNBUFFERED=1
@@ -73,7 +73,8 @@ RUN npm install --prefer-offline --no-audit && \
 # README.md is referenced by pyproject.toml's `readme =` field, but it's
 # excluded from the build context by .dockerignore's `*.md`.  uv's build
 # frontend stats the readme path during dep resolution, so we `touch` an
-# empty placeholder — the real README is restored by the final COPY step.
+# empty placeholder — the real README is restored by Dockerfile.app's
+# `COPY . .` step.
 #
 # `uv sync --frozen --no-install-project --extra all` installs only the
 # deps reachable through the composite `[all]` extra (handpicked set
@@ -82,7 +83,7 @@ RUN npm install --prefer-offline --no-audit && \
 # git), `[yc-bench]` (another git dep), and `[termux-all]` (Android
 # redundancy), none of which belong in the published container.
 #
-# The editable link is created after the full source copy.
+# The editable link is created in Dockerfile.app after the full source copy.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
 RUN uv sync --frozen --no-install-project --extra all
@@ -102,16 +103,4 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
 ENV PATH="/opt/data/.local/bin:${PATH}"
 VOLUME [ "/opt/data" ]
-
-# ========== Application layer (from Dockerfile.app) ==========
-# Copy source code and perform app-specific build steps
-
-COPY --chown=hermes:hermes . .
-
-RUN cd web && npm run build && \
-    cd ../ui-tui && npm run build
-
-RUN uv pip install --no-cache-dir --no-deps -e "."
-
-# Final entrypoint
 ENTRYPOINT [ "/usr/bin/tini", "-g", "--", "/opt/hermes/docker/entrypoint.sh" ]

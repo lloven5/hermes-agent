@@ -17,9 +17,9 @@
 #   - If you override entrypoint, keep /opt/hermes/docker/entrypoint.sh in
 #     the command chain. It drops root to the hermes user before gateway
 #     files such as gateway.lock are created.
-#   - The gateway's API server is off unless you uncomment API_SERVER_KEY
-#     and API_SERVER_HOST. See docs/user-guide/api-server.md before doing
-#     this on an internet-facing host.
+#   - API server defaults below use a **development-only** API_SERVER_KEY when
+#     unset (see compose). Replace API_SERVER_KEY before any internet-facing
+#     or multi-tenant deployment. See docs/user-guide/api-server.md.
 #
 services:
   gateway:
@@ -33,10 +33,13 @@ services:
     environment:
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
-      # To expose the OpenAI-compatible API server beyond localhost,
-      # uncomment BOTH lines (API_SERVER_KEY is mandatory for auth):
-      # - API_SERVER_HOST=0.0.0.0
-      # - API_SERVER_KEY=${API_SERVER_KEY}
+      - HERMES_DASHBOARD=${HERMES_DASHBOARD:-1}
+      # API Server - enabled by default for local/LAN access
+      - API_SERVER_ENABLED=${API_SERVER_ENABLED:-true}
+      - API_SERVER_HOST=${API_SERVER_HOST:-0.0.0.0}
+      - API_SERVER_PORT=${API_SERVER_PORT:-8642}
+      # 开发默认；生产请 export API_SERVER_KEY=强随机串
+      - API_SERVER_KEY=${API_SERVER_KEY:-hermes-compose-dev-only-replace-in-production}
       # Microsoft Teams — uncomment and fill in to enable Teams gateway.
       # Register your bot at https://dev.botframework.com/ to get these values.
       # - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
