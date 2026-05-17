@@ -4,9 +4,11 @@
 # Build command:
 #   docker build -t hermes-agent:latest .
 #
-# Note: The two-stage builder from Dockerfile.base is preserved to allow
-# layer caching for dependency changes separately from source code changes.
-# The final stage produces the runtime image.
+# Note: The COPY --from= directives pull binary tools from source images
+# (uv, gosu) but this is a single-stage build. For layer caching of
+# dependencies separately from source changes, use the split base/app approach:
+#   docker build -f Dockerfile.base -t hermes-agent-base:latest .
+#   docker build -f Dockerfile.app -t hermes-agent:app .
 FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
 FROM tianon/gosu:1.19-trixie@sha256:3b176695959c71e123eb390d427efc665eeb561b1540e82679c15e992006b8b9 AS gosu_source
 FROM debian:13.4 AS base
@@ -108,10 +110,13 @@ VOLUME [ "/opt/data" ]
 
 COPY --chown=hermes:hermes . .
 
-RUN cd web && npm run build && \
-    cd ../ui-tui && npm run build
+RUN npm -C web run build && \
+    npm -C ui-tui run build
 
 RUN uv pip install --no-cache-dir --no-deps -e "."
+
+# Switch to non-root user for runtime security
+USER hermes
 
 # Final entrypoint
 ENTRYPOINT [ "/usr/bin/tini", "-g", "--", "/opt/hermes/docker/entrypoint.sh" ]
